@@ -806,13 +806,28 @@ class VideoEditor(_Root):
                   font=("Helvetica", 11, "bold")).pack(anchor="w", pady=(6, 2))
 
         cols = ("Text", "Start", "End", "Position", "Size", "Color")
-        self.lbl_tree = ttk.Treeview(left, columns=cols, show="headings",
-                                     selectmode="browse", height=8)
-        for c, w in zip(cols, (180, 70, 70, 90, 60, 90)):
+        twrap = ttk.Frame(left)
+        twrap.pack(fill="x", pady=(0, 4))
+        self.lbl_tree = ttk.Treeview(twrap, columns=cols, show="headings",
+                                     selectmode="browse", height=5)
+        for c, w in zip(cols, (170, 65, 65, 85, 55, 85)):
             self.lbl_tree.heading(c, text=c)
             self.lbl_tree.column(c, width=w, anchor="w")
-        self.lbl_tree.pack(fill="both", expand=True)
+        lsb = ttk.Scrollbar(twrap, orient="vertical",
+                            command=self.lbl_tree.yview)
+        self.lbl_tree.configure(yscrollcommand=lsb.set)
+        self.lbl_tree.pack(side="left", fill="both", expand=True)
+        lsb.pack(side="right", fill="y")
         self.lbl_tree.bind("<<TreeviewSelect>>", lambda e: self._lbl_load_sel())
+
+        def _wheel(e):
+            d = -1 if (getattr(e, "delta", 0) > 0 or getattr(e, "num", 0) == 4) else 1
+            self.lbl_tree.yview_scroll(d, "units")
+            return "break"
+
+        self.lbl_tree.bind("<MouseWheel>", _wheel)
+        self.lbl_tree.bind("<Button-4>", _wheel)
+        self.lbl_tree.bind("<Button-5>", _wheel)
 
         bf = ttk.Frame(left)
         bf.pack(fill="x", pady=6)
@@ -835,8 +850,8 @@ class VideoEditor(_Root):
         self.lbl_start = tk.StringVar(value="0")
         ttk.Entry(ed, textvariable=self.lbl_start, width=10).pack(fill="x", pady=(2, 6))
 
-        ttk.Label(ed, text="End time (s)").pack(anchor="w")
-        self.lbl_end = tk.StringVar(value="5")
+        ttk.Label(ed, text="End time (s) — 'end' = until video ends").pack(anchor="w")
+        self.lbl_end = tk.StringVar(value="end")
         ttk.Entry(ed, textvariable=self.lbl_end, width=10).pack(fill="x", pady=(2, 6))
 
         ttk.Label(ed, text="Position").pack(anchor="w")
@@ -919,9 +934,15 @@ class VideoEditor(_Root):
         if pos in table:
             return table[pos]
         try:
-            return float(self.lbl_x.get()), float(self.lbl_y.get())
+            x = min(100.0, max(0.0, float(self.lbl_x.get())))
+            y = min(100.0, max(0.0, float(self.lbl_y.get())))
         except ValueError:
-            return 50.0, 90.0
+            x, y = 50.0, 90.0
+        return x, y
+
+    @staticmethod
+    def _fmt_t(v):
+        return "end" if v is None else f"{v}s"
 
     def _collect_label(self):
         text = self.lbl_text.get()
@@ -929,9 +950,18 @@ class VideoEditor(_Root):
             return None
         try:
             start = max(0.0, float(self.lbl_start.get()))
-            end = max(start + 0.1, float(self.lbl_end.get()))
         except ValueError:
-            start, end = 0.0, 5.0
+            start = 0.0
+        raw = self.lbl_end.get().strip().lower()
+        if raw in ("", "end", "full", "video", "-"):
+            end = None
+        else:
+            try:
+                end = float(raw)
+            except ValueError:
+                end = None
+            if end is not None and end <= start:
+                end = None
         x, y = self._pos_xy()
         color = self.lbl_color.get()
         if not re.match(r"^#[0-9a-fA-F]{6}$", color):
@@ -951,7 +981,7 @@ class VideoEditor(_Root):
             return
         self.labels.append(lab)
         self._log(f"Label added: '{lab['text'][:30]}' "
-                  f"({lab['start']}s-{lab['end']}s, {lab['pos']})")
+                  f"({self._fmt_t(lab['start'])}-{self._fmt_t(lab['end'])}, {lab['pos']})")
         self._refresh_labels()
 
     def _lbl_update(self):
@@ -982,7 +1012,7 @@ class VideoEditor(_Root):
         lab = self.labels[int(sel[0])]
         self.lbl_text.set(lab["text"])
         self.lbl_start.set(str(lab["start"]))
-        self.lbl_end.set(str(lab["end"]))
+        self.lbl_end.set("end" if lab["end"] is None else str(lab["end"]))
         self.lbl_pos.set(lab.get("pos", "Custom (x%, y%)"))
         self.lbl_x.set(str(lab["x"]))
         self.lbl_y.set(str(lab["y"]))
@@ -997,34 +1027,141 @@ class VideoEditor(_Root):
         self.lbl_tree.delete(*self.lbl_tree.get_children())
         for i, lab in enumerate(self.labels):
             self.lbl_tree.insert("", "end", iid=str(i), values=(
-                lab["text"][:28], f"{lab['start']}s", f"{lab['end']}s",
+                lab["text"][:28], self._fmt_t(lab["start"]),
+                self._fmt_t(lab["end"]),
                 lab["pos"].replace(" (x%, y%)", ""), lab["size"], lab["color"]))
 
-    def _label_filter(self, w, h):
-        """Build drawtext filter chain from self.labels."""
+    # ---------- text fitting so labels never leave the frame ----------
+    def _measure_line(self, text, fontfile, size):
+        """Return (width, line_height) in px for one line of text."""
+        try:
+            if fontfile:
+                from PIL import ImageFont
+                f = ImageFont.truetype(fontfile, size)
+                ascent, descent = f.getmetrics()
+                return f.getlength(text), ascent + descent
+        except Exception:
+            pass
+        # fallback: ~0.55em average advance for proportional fonts
+        return 0.55 * size * max(1, len(text)), 1.2 * size
+
+    def _break_word(self, word, fontfile, size, max_w):
+        lines, cur = [], ""
+        for ch in word:
+            cand = cur + ch
+            if cur and self._measure_line(cand, fontfile, size)[0] > max_w:
+                lines.append(cur)
+                cur = ch
+            else:
+                cur = cand
+        if cur:
+            lines.append(cur)
+        return lines or [""]
+
+    def _wrap_line(self, text, fontfile, size, max_w):
+        if not text.strip():
+            return [text]
+        lines, cur = [], ""
+        for word in text.split(" "):
+            if self._measure_line(word, fontfile, size)[0] > max_w:
+                if cur:
+                    lines.append(cur)
+                    cur = ""
+                lines.extend(self._break_word(word, fontfile, size, max_w))
+                continue
+            cand = word if not cur else cur + " " + word
+            if self._measure_line(cand, fontfile, size)[0] <= max_w:
+                cur = cand
+            else:
+                lines.append(cur)
+                cur = word
+        if cur:
+            lines.append(cur)
+        return lines or [""]
+
+    def _fit_text(self, text, fontfile, size, max_w, max_h, min_size=8):
+        """Wrap and, if needed, shrink text so the block fits max_w x max_h.
+
+        Returns (lines, size). Never returns a block wider/taller than the
+        allowed area (last line is trimmed with an ellipsis in the extreme
+        case where even min_size does not fit).
+        """
+        size = max(min_size, int(size or 48))
+        while True:
+            lines = []
+            for para in str(text).split("\n"):
+                lines.extend(self._wrap_line(para, fontfile, size, max_w))
+            widest = max((self._measure_line(l, fontfile, size)[0] for l in lines),
+                         default=0)
+            line_h = self._measure_line(lines[0], fontfile, size)[1]
+            if (widest <= max_w and len(lines) * line_h <= max_h) or size <= min_size:
+                break
+            size = max(min_size, int(size * 0.85))
+        line_h = self._measure_line(lines[0], fontfile, size)[1]
+        fit = max(1, int(max_h // line_h))
+        if len(lines) > fit:
+            lines = lines[:fit]
+            last = lines[-1]
+            lines[-1] = (last[:-1] + "…") if len(last) > 1 else last
+        if widest > max_w:
+            lines = [self._break_word(l, fontfile, size, max_w)[0] for l in lines]
+        return lines, size
+
+    def _label_filter(self, w, h, duration=None):
+        """Build drawtext filter chain from self.labels.
+
+        end=None means 'until the end of the video'; it is resolved to the
+        actual duration (and clamped) when duration is provided.
+        """
         chain = []
-        for i, lab in enumerate(self.labels):
+        for lab in self.labels:
             x_pct, y_pct = lab["x"], lab["y"]
-            # convert to pixel expression, centered
-            x_expr = f"(w*{x_pct/100})-(text_w/2)"
-            y_expr = f"(h*{y_pct/100})-(text_h/2)"
             color = lab["color"].replace("#", "0x")
             fontfile = self._resolve_font(lab["font"])
-            text = lab["text"].replace("\\", "\\\\").replace("'", "\\'") \
-                             .replace(":", "\\:").replace("%", "\\%")
+            # keep the text block inside the frame: pad, wrap, shrink
+            pad_x = max(16, int(w * 0.04)) + int(lab["outline"])
+            pad_y = max(12, int(h * 0.05)) + int(lab["outline"])
+            if lab["bg"]:
+                pad_x += 10
+                pad_y += 10
+            lines, size = self._fit_text(
+                lab["text"], fontfile, lab["size"],
+                max(1, w - 2 * pad_x), max(1, h - 2 * pad_y))
+            # center uses the plain (w-text_w)/2 idiom; other anchors get a
+            # guard so a wide block starts at the margin, never off-screen
+            if abs(x_pct - 50) < 0.01:
+                x_expr = "'(w-text_w)/2'"
+            else:
+                x_expr = f"'max({pad_x},min(w*{x_pct / 100:.4f}-text_w/2,w-{pad_x}-text_w))'"
+            if abs(y_pct - 50) < 0.01:
+                y_expr = "'(h-text_h)/2'"
+            else:
+                y_expr = f"'max({pad_y},min(h*{y_pct / 100:.4f}-text_h/2,h-{pad_y}-text_h))'"
+            text = "\n".join(lines).replace("\\", "\\\\").replace("'", "\\'") \
+                                   .replace(":", "\\:").replace("%", "\\%")
+            s = max(0.0, float(lab["start"]))
+            e = lab["end"]
+            if duration and duration > 0:
+                s = min(s, max(0.0, duration - 0.1))
+                if e is None or e > duration:
+                    e = duration
+                e = max(e, s + 0.1)
+            elif e is None:
+                e = 999999
             parts = [f"text='{text}'"]
             parts.append(f"fontfile='{fontfile}'" if fontfile else f"font='{lab['font']}'")
-            parts.append(f"fontsize={lab['size']}")
+            parts.append(f"fontsize={size}")
             parts.append(f"fontcolor={color}")
             parts.append(f"x={x_expr}")
             parts.append(f"y={y_expr}")
-            parts.append(f"enable='between(t,{lab['start']},{lab['end']})'")
+            parts.append(f"enable='between(t,{s},{e})'")
+            parts.append("line_spacing=4")
             if lab["outline"] > 0:
                 parts.append(f"borderw={lab['outline']}")
                 parts.append("bordercolor=black")
             if lab["bg"]:
                 parts.append("box=1")
-                parts.append("boxcolor=black@0.45")
+                parts.append("boxcolor=black@0.5")
                 parts.append("boxborderw=10")
             chain.append("drawtext=" + ":".join(parts))
         return chain
@@ -1075,7 +1212,7 @@ class VideoEditor(_Root):
             return
         info = probe(p)
         v = info["v"] or {"w": 1280, "h": 720}
-        chain = self._label_filter(v["w"], v["h"])
+        chain = self._label_filter(v["w"], v["h"], info["duration"])
         vf = ",".join(chain)
         args = ["-i", p, "-vf", vf,
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18",
