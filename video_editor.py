@@ -84,12 +84,54 @@ class VideoEditor(_Root):
         self.prog_var = tk.StringVar(value="")
         self._cancelled = False
         self._msgs = queue.Queue()
+        self._tab_canvases = []
+        self._paned_inited = False
         self._init_logging()
         self._build_style()
         self._setup_dnd()
         self._build_ui()
         self.after(80, self._poll_msgs)
         self._log(f"Video Editor started (ffmpeg: {FFMPEG})")
+
+    def _on_wheel(self, e):
+        if getattr(e, "num", None) == 4:
+            delta = -1
+        elif getattr(e, "num", None) == 5:
+            delta = 1
+        elif getattr(e, "delta", 0) > 0:
+            delta = -1
+        elif getattr(e, "delta", 0) < 0:
+            delta = 1
+        else:
+            return
+        w = e.widget
+        while isinstance(w, tk.Widget):
+            if w in self._tab_canvases:
+                w.yview_scroll(delta, "units")
+                return
+            w = w.master
+
+    def _scrolled_tab(self, title):
+        outer = ttk.Frame(self.nb)
+        self.nb.add(outer, text=title)
+        canvas = tk.Canvas(outer, bg="#1e1e2e", highlightthickness=0, bd=0)
+        vsb = ttk.Scrollbar(outer, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        inner = ttk.Frame(canvas, padding=10)
+        cid = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfig(cid, width=e.width))
+        canvas.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self._tab_canvases.append(canvas)
+        return inner
+
+    def _init_sash(self, e):
+        if not self._paned_inited and e.height > 100:
+            self._paned_inited = True
+            self.paned.sashpos(0, e.height // 2)
 
     def _init_logging(self):
         self.logger = logging.getLogger("video_editor")
@@ -232,8 +274,18 @@ class VideoEditor(_Root):
                   foreground="#89b4fa").pack(side="left")
         ttk.Label(top, textvariable=self.status_var).pack(side="right")
 
-        self.nb = ttk.Notebook(self)
-        self.nb.pack(fill="both", expand=True, padx=8, pady=4)
+        # split: tabs (upload/list) top half, log console bottom half
+        self.paned = ttk.PanedWindow(self, orient="vertical")
+        self.paned.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        self.paned.bind("<Configure>", self._init_sash)
+        self.bind("<MouseWheel>", self._on_wheel, add="+")
+        self.bind("<Button-4>", self._on_wheel, add="+")
+        self.bind("<Button-5>", self._on_wheel, add="+")
+
+        tabpane = ttk.Frame(self.paned)
+        self.paned.add(tabpane, weight=1)
+        self.nb = ttk.Notebook(tabpane)
+        self.nb.pack(fill="both", expand=True)
 
         self._tab_concat()
         self._tab_quality()
@@ -241,8 +293,8 @@ class VideoEditor(_Root):
         self._tab_basic()
 
         # ---------- status / log console ----------
-        con = ttk.Frame(self, padding=(8, 0))
-        con.pack(fill="x")
+        con = ttk.Frame(self.paned, padding=(0, 4))
+        self.paned.add(con, weight=1)
 
         hdr = ttk.Frame(con)
         hdr.pack(fill="x")
@@ -261,7 +313,7 @@ class VideoEditor(_Root):
                   font=("Courier", 9), anchor="w").pack(fill="x")
 
         lf = ttk.Frame(con)
-        lf.pack(fill="x", pady=(2, 4))
+        lf.pack(fill="both", expand=True, pady=(2, 0))
         self.log_text = tk.Text(lf, height=6, bg="#11111b", fg="#cdd6f4",
                                 font=("Courier", 9), wrap="word",
                                 state="normal", relief="flat",
@@ -385,8 +437,7 @@ class VideoEditor(_Root):
 
     # ---------- Tab 1: Concat ----------
     def _tab_concat(self):
-        f = ttk.Frame(self.nb, padding=10)
-        self.nb.add(f, text="  Concatenate  ")
+        f = self._scrolled_tab("  Concatenate  ")
 
         left = ttk.Frame(f)
         left.pack(side="left", fill="both", expand=True)
@@ -406,7 +457,7 @@ class VideoEditor(_Root):
 
         cols = ("#", "File", "Duration", "Resolution", "Size")
         self.concat_tree = ttk.Treeview(left, columns=cols, show="headings",
-                                        selectmode="extended", height=14)
+                                        selectmode="extended", height=9)
         for c, w in zip(cols, (40, 340, 90, 110, 90)):
             self.concat_tree.heading(c, text=c)
             self.concat_tree.column(c, width=w, anchor="w")
@@ -582,8 +633,7 @@ class VideoEditor(_Root):
 
     # ---------- Tab 2: Quality ----------
     def _tab_quality(self):
-        f = ttk.Frame(self.nb, padding=10)
-        self.nb.add(f, text="  Quality Upgrade  ")
+        f = self._scrolled_tab("  Quality Upgrade  ")
 
         left = ttk.Frame(f)
         left.pack(side="left", fill="both", expand=True)
@@ -740,8 +790,7 @@ class VideoEditor(_Root):
 
     # ---------- Tab 3: Labels ----------
     def _tab_labels(self):
-        f = ttk.Frame(self.nb, padding=10)
-        self.nb.add(f, text="  Labels / Text  ")
+        f = self._scrolled_tab("  Labels / Text  ")
 
         left = ttk.Frame(f)
         left.pack(side="left", fill="both", expand=True)
@@ -1036,8 +1085,7 @@ class VideoEditor(_Root):
 
     # ---------- Tab 4: Basic tools ----------
     def _tab_basic(self):
-        f = ttk.Frame(self.nb, padding=10)
-        self.nb.add(f, text="  Basic Tools  ")
+        f = self._scrolled_tab("  Basic Tools  ")
 
         row = ttk.Frame(f)
         row.pack(fill="x", pady=(0, 8))
