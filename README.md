@@ -1,7 +1,7 @@
 # Video Editor
 
-A GUI video editor built on top of FFmpeg (Python + Tkinter). No extra Python
-dependencies — only `ffmpeg`/`ffprobe` must be installed.
+A GUI video editor built on top of FFmpeg (Python + Tkinter). Only
+`ffmpeg`/`ffprobe` must be installed; `tkinterdnd2` is optional (drag & drop).
 
 ## Run
 
@@ -9,10 +9,19 @@ dependencies — only `ffmpeg`/`ffprobe` must be installed.
 python3 video_editor.py
 ```
 
+Optional drag & drop support:
+
+```bash
+pip install tkinterdnd2
+```
+
 ## Features
 
 ### 1. Concatenate
-- Add multiple videos, reorder them with **Move Up / Move Down** (list order = final order)
+- Add multiple videos at once — **Ctrl/Shift+click** in the file dialog,
+  or **drag & drop** files straight into the window
+- Reorder with **Move Up / Move Down** (multi-select moves the whole block;
+  list order = final order)
 - Two modes:
   - **Re-encode (safe)** — normalizes all clips to the first video's
     resolution/fps and audio format, then joins (works with any input)
@@ -40,5 +49,19 @@ python3 video_editor.py
 - Rotate (90° CW/CCW, 180°) and flip
 - Adjust volume
 
+### 5. Status / Log console
+- Shows the exact CLI command being executed (`$ ffmpeg ...`)
+- Live FFmpeg progress (frame/fps/time/speed) plus the progress bar
+- Timestamped log of every operation (adds, drops, label edits, completion
+  times, cancellations, failures) — errors in red, warnings in yellow
+- Successful operations are shown in the console only; **failures and errors
+  are also saved** to `video_editor.log` next to the script
+
 All operations run in background threads with a progress bar and a Cancel
 button, so the UI never freezes.
+
+## Windows / macOS
+
+Works on Linux, macOS, and Windows (pure Python stdlib + Tkinter). Install
+FFmpeg and add it to `PATH`. Label fonts are resolved from the system font
+directories of each platform.

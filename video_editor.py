@@ -9,9 +9,21 @@ import shutil
 import threading
 import tempfile
 import queue
+import logging
+import shlex
+import time
+
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    _Root = TkinterDnD.Tk
+except ImportError:
+    DND_FILES = None
+    _Root = tk.Tk
 
 FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 FFPROBE = shutil.which("ffprobe") or "ffprobe"
+VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv",
+              ".wmv", ".ts", ".m4v", ".mpg", ".mpeg"}
 
 
 def probe(path):
@@ -52,22 +64,110 @@ def human_dur(s):
     return f"{s // 60:02d}:{s % 60:02d}"
 
 
-class VideoEditor(tk.Tk):
+class VideoEditor(_Root):
     def __init__(self):
         super().__init__()
         self.title("Video Editor")
-        self.geometry("1280x800")
-        self.minsize(960, 600)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w = min(1280, max(960, int(sw * 0.92)))
+        h = min(900, max(560, int(sh * 0.92)))
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.minsize(900, 520)
         self.configure(bg="#1e1e2e")
         self.videos = []
         self.labels = []
         self.progress_var = tk.DoubleVar(value=0)
         self.status_var = tk.StringVar(value="Ready")
+        self.cmd_var = tk.StringVar(value="Ready")
+        self.prog_var = tk.StringVar(value="")
         self._cancelled = False
         self._msgs = queue.Queue()
+        self._init_logging()
         self._build_style()
+        self._setup_dnd()
         self._build_ui()
         self.after(80, self._poll_msgs)
+        self._log(f"Video Editor started (ffmpeg: {FFMPEG})")
+
+    def _init_logging(self):
+        self.logger = logging.getLogger("video_editor")
+        self.logger.setLevel(logging.DEBUG)
+        self.log_path = ""
+        if not self.logger.handlers:
+            fh = None
+            for base in (os.path.dirname(os.path.abspath(__file__)),
+                         tempfile.gettempdir()):
+                path = os.path.join(base, "video_editor.log")
+                try:
+                    fh = logging.FileHandler(path, encoding="utf-8")
+                    self.log_path = path
+                    break
+                except OSError:
+                    continue
+            if fh:
+                fh.setFormatter(logging.Formatter(
+                    "%(asctime)s %(levelname)-7s %(message)s", "%H:%M:%S"))
+                fh.setLevel(logging.ERROR)
+                self.logger.addHandler(fh)
+
+    def _log(self, msg, level="info"):
+        getattr(self.logger, level)(msg)
+        self._post(self._append_log,
+                   f"[{time.strftime('%H:%M:%S')}] {msg}", level)
+
+    def _append_log(self, line, level="info"):
+        if not hasattr(self, "log_text"):
+            return
+        tag = level if level in ("error", "warning") else None
+        if tag:
+            self.log_text.insert("end", line + "\n", tag)
+        else:
+            self.log_text.insert("end", line + "\n")
+        if int(self.log_text.index("end-1c").split(".")[0]) > 2000:
+            self.log_text.delete("1.0", "600.0")
+        self.log_text.see("end")
+
+    def _setup_dnd(self):
+        self._dnd_ok = False
+        if DND_FILES is None:
+            return
+        try:
+            self.drop_target_register(DND_FILES)
+            self.dnd_bind("<<Drop>>", self._on_drop)
+            self.dnd_bind("<<DropEnter>>", lambda e: "copy")
+            self._dnd_ok = True
+        except Exception:
+            pass
+
+    def _on_drop(self, event):
+        try:
+            paths = list(self.tk.splitlist(event.data))
+        except Exception:
+            paths = [event.data]
+        added = 0
+        for p in paths:
+            p = p.strip()
+            if not p:
+                continue
+            if (os.path.splitext(p)[1].lower() in VIDEO_EXTS
+                    and os.path.isfile(p)
+                    and p not in [v["path"] for v in self.videos]):
+                try:
+                    self.videos.append({"path": p, "info": probe(p)})
+                    added += 1
+                except Exception as e:
+                    self._log(f"Cannot read file {p}: {e}", "error")
+        if added:
+            self._refresh_concat()
+            self.nb.select(0)
+            self.status_var.set(f"Added {added} video(s) via drag & drop")
+            self._log(f"Drag & drop: added {added} video(s)")
+        else:
+            self.status_var.set("No new video files found in drop")
+            self._log("Drag & drop: no new video files found", "warning")
+        return "copy"
 
     def _post(self, fn, *args):
         self._msgs.put((fn, args))
@@ -140,13 +240,47 @@ class VideoEditor(tk.Tk):
         self._tab_labels()
         self._tab_basic()
 
+        # ---------- status / log console ----------
+        con = ttk.Frame(self, padding=(8, 0))
+        con.pack(fill="x")
+
+        hdr = ttk.Frame(con)
+        hdr.pack(fill="x")
+        ttk.Label(hdr, text="Status / Log", font=("Helvetica", 10, "bold"),
+                  foreground="#89b4fa").pack(side="left")
+        if self.log_path:
+            ttk.Label(hdr, text=self.log_path, foreground="#6c7086",
+                      font=("Courier", 8)).pack(side="right")
+        ttk.Button(hdr, text="Clear log",
+                   command=lambda: self.log_text.delete("1.0", "end")
+                   ).pack(side="right", padx=8)
+
+        ttk.Label(con, textvariable=self.cmd_var, foreground="#a6e3a1",
+                  font=("Courier", 9), anchor="w").pack(fill="x", pady=(2, 0))
+        ttk.Label(con, textvariable=self.prog_var, foreground="#f9e2af",
+                  font=("Courier", 9), anchor="w").pack(fill="x")
+
+        lf = ttk.Frame(con)
+        lf.pack(fill="x", pady=(2, 4))
+        self.log_text = tk.Text(lf, height=6, bg="#11111b", fg="#cdd6f4",
+                                font=("Courier", 9), wrap="word",
+                                state="normal", relief="flat",
+                                highlightthickness=1,
+                                highlightbackground="#313244")
+        self.log_text.tag_configure("error", foreground="#f38ba8")
+        self.log_text.tag_configure("warning", foreground="#f9e2af")
+        lsb = ttk.Scrollbar(lf, orient="vertical",
+                            command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=lsb.set)
+        self.log_text.pack(side="left", fill="both", expand=True)
+        lsb.pack(side="right", fill="y")
+
         bar = ttk.Frame(self, padding=(8, 4))
         bar.pack(fill="x")
         self.pbar = ttk.Progressbar(bar, variable=self.progress_var,
                                     maximum=100, mode="determinate")
         self.pbar.pack(fill="x", side="left", expand=True, padx=(0, 8))
         ttk.Button(bar, text="Cancel", command=self._cancel).pack(side="right")
-        self._cancelled = False
 
     # ---------- helpers ----------
     def _pick_videos(self):
@@ -164,37 +298,66 @@ class VideoEditor(tk.Tk):
         self.progress_var.set(0)
         self.status_var.set("Processing...")
         self.config(cursor="watch")
+        cmd = " ".join(shlex.quote(a) for a in [FFMPEG, "-y", *args])
+        self.cmd_var.set("$ " + cmd)
+        self.prog_var.set("starting ffmpeg...")
+        self._log("$ " + cmd)
+        t0 = time.time()
 
         def worker():
+            code = 1
             try:
                 proc = subprocess.Popen([FFMPEG, "-y", *args],
                                         stdout=subprocess.PIPE,
                                         stderr=subprocess.STDOUT, text=True)
-                for line in proc.stdout:
+                for raw in proc.stdout:
                     if self._cancelled:
                         proc.terminate()
                         break
-                    if duration > 0:
-                        m = re.search(r"time=(\d+):(\d+):(\d+)\.(\d+)", line)
-                        if m:
-                            t = (int(m.group(1)) * 3600 + int(m.group(2)) * 60
-                                 + int(m.group(3)) + int(m.group(4)) / 100)
-                            pct = min(99, t / duration * 100)
-                            self._post(self.progress_var.set, pct)
+                    raw = raw.rstrip("\n")
+                    if not raw:
+                        continue
+                    self.logger.debug(raw)
+                    if "time=" in raw:
+                        tail = raw.split("\r")[-1].strip()
+                        if tail:
+                            self._post(self.prog_var.set, tail[:180])
+                        if duration > 0:
+                            m = re.search(r"time=(\d+):(\d+):(\d+)\.(\d+)", raw)
+                            if m:
+                                t = (int(m.group(1)) * 3600 + int(m.group(2)) * 60
+                                     + int(m.group(3)) + int(m.group(4)) / 100)
+                                pct = min(99, t / duration * 100)
+                                self._post(self.progress_var.set, pct)
+                    else:
+                        for sub in raw.split("\r"):
+                            sub = sub.strip()
+                            if sub:
+                                self._post(self._append_log, sub)
                 code = proc.wait()
-            except Exception:
+            except Exception as e:
+                self._log(f"ffmpeg error: {e}", "error")
                 code = 1
             ok = code == 0 and not self._cancelled
-            self._post(self._done, ok, on_done)
+            self._post(self._done, ok, on_done, time.time() - t0, code)
         threading.Thread(target=worker, daemon=True).start()
 
-    def _done(self, ok, on_done):
+    def _done(self, ok, on_done, elapsed=None, code=None):
         self.config(cursor="")
+        dur = f" in {elapsed:.1f}s" if elapsed is not None else ""
         if ok:
             self.progress_var.set(100)
             self.status_var.set("Done")
+            self.prog_var.set(f"completed{dur}")
+            self._log(f"Completed{dur}")
         else:
             self.status_var.set("Cancelled / Failed")
+            if self._cancelled:
+                self.prog_var.set("cancelled by user")
+                self._log("Operation cancelled by user", "warning")
+            else:
+                self.prog_var.set(f"ffmpeg failed (exit code {code})")
+                self._log(f"ffmpeg failed (exit code {code})", "error")
             messagebox.showwarning("Video Editor", "Operation cancelled or failed.")
         if on_done:
             on_done(ok)
@@ -208,6 +371,7 @@ class VideoEditor(tk.Tk):
     def _cancel(self):
         self._cancelled = True
         self.status_var.set("Cancelling...")
+        self._log("Cancel requested by user", "warning")
 
     def _output_path(self, default="output.mp4"):
         return filedialog.asksaveasfilename(
@@ -270,14 +434,22 @@ class VideoEditor(tk.Tk):
         ttk.Button(right, text="▶ Concatenate", style="Accent.TButton",
                    command=self._concat_go).pack(fill="x", pady=8)
 
-        ttk.Label(right, text="Order in the list = order\nin the final video.",
-                  foreground="#a6adc8").pack(anchor="w", pady=10)
+        hint = "Order in the list = order\nin the final video.\n\nFiles dialog: Ctrl/Shift+click\nto select multiple videos."
+        if self._dnd_ok:
+            hint += "\n\nOr drag & drop video files\nstraight into this window."
+        else:
+            hint += "\n\nTip: pip install tkinterdnd2\nto enable drag & drop."
+        ttk.Label(right, text=hint, foreground="#a6adc8",
+                  justify="left").pack(anchor="w", pady=10)
 
     def _concat_add(self):
+        added = 0
         for p in self._pick_videos():
             if p not in [v["path"] for v in self.videos]:
-                info = probe(p)
-                self.videos.append({"path": p, "info": info})
+                self.videos.append({"path": p, "info": probe(p)})
+                added += 1
+        if added:
+            self._log(f"Added {added} video(s) to concat list")
         self._refresh_concat()
 
     def _concat_remove(self):
@@ -285,20 +457,34 @@ class VideoEditor(tk.Tk):
         idxs = sorted([int(i) for i in sel], reverse=True)
         for i in idxs:
             self.videos.pop(i)
+        if idxs:
+            self._log(f"Removed {len(idxs)} video(s) from concat list")
         self._refresh_concat()
 
     def _concat_move(self, delta):
-        sel = self.concat_tree.selection()
-        if len(sel) != 1:
+        sel = sorted(int(i) for i in self.concat_tree.selection())
+        if not sel:
             return
-        i = int(sel[0])
-        j = i + delta
-        if 0 <= j < len(self.videos):
-            self.videos[i], self.videos[j] = self.videos[j], self.videos[i]
-            self._refresh_concat()
-            self.concat_tree.selection_set(str(j))
+        n = len(self.videos)
+        if delta < 0 and sel[0] == 0:
+            return
+        if delta > 0 and sel[-1] == n - 1:
+            return
+        selset = set(sel)
+        selected = [self.videos[i] for i in sel]
+        rest = [self.videos[i] for i in range(n) if i not in selset]
+        if delta < 0:
+            ins = sel[0] - 1
+        else:
+            ins = (sel[-1] + 1) - len(sel) + 1
+        self.videos = rest[:ins] + selected + rest[ins:]
+        self._refresh_concat()
+        moved = [str(i) for i in range(ins, ins + len(sel))]
+        self.concat_tree.selection_set(*moved)
 
     def _concat_clear(self):
+        if self.videos:
+            self._log(f"Cleared concat list ({len(self.videos)} video(s))")
         self.videos.clear()
         self._refresh_concat()
 
@@ -320,6 +506,9 @@ class VideoEditor(tk.Tk):
             return
         fmt = self.concat_fmt.get()
         stream_copy = self.concat_mode.get().startswith("Stream")
+        self._log(f"Concat start: {len(self.videos)} videos, "
+                  f"mode={'stream-copy' if stream_copy else 're-encode'}, "
+                  f"format={fmt} -> {out}")
 
         # normalize all to same resolution / fps using first video
         first = self.videos[0]["info"]
@@ -712,6 +901,8 @@ class VideoEditor(tk.Tk):
         if not lab:
             return
         self.labels.append(lab)
+        self._log(f"Label added: '{lab['text'][:30]}' "
+                  f"({lab['start']}s-{lab['end']}s, {lab['pos']})")
         self._refresh_labels()
 
     def _lbl_update(self):
@@ -722,6 +913,7 @@ class VideoEditor(tk.Tk):
         lab = self._collect_label()
         if lab:
             self.labels[i] = lab
+            self._log(f"Label #{i + 1} updated: '{lab['text'][:30]}'")
             self._refresh_labels()
             self.lbl_tree.selection_set(str(i))
 
@@ -729,7 +921,9 @@ class VideoEditor(tk.Tk):
         sel = self.lbl_tree.selection()
         if not sel:
             return
-        self.labels.pop(int(sel[0]))
+        i = int(sel[0])
+        self.labels.pop(i)
+        self._log(f"Label #{i + 1} removed")
         self._refresh_labels()
 
     def _lbl_load_sel(self):
