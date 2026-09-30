@@ -26,6 +26,9 @@ pip install tkinterdnd2
   - **Re-encode (safe)** — normalizes all clips to the first video's
     resolution/fps and audio format, then joins (works with any input)
   - **Stream copy (fast)** — instant, but inputs must share codec parameters
+- Trim every list item independently: select one clip, set its start and end
+  times in seconds, then join only the kept ranges. Safe mode trims accurately;
+  stream-copy cuts may align to nearby keyframes.
 - Output format: mp4 / mkv / mov / webm
 
 ### 2. Quality Upgrade

@@ -12,6 +12,7 @@ import queue
 import logging
 import shlex
 import time
+import math
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -197,7 +198,10 @@ class VideoEditor(_Root):
                     and os.path.isfile(p)
                     and p not in [v["path"] for v in self.videos]):
                 try:
-                    self.videos.append({"path": p, "info": probe(p)})
+                    info = probe(p)
+                    self.videos.append({"path": p, "info": info,
+                                        "trim_start": 0.0,
+                                        "trim_end": info["duration"]})
                     added += 1
                 except Exception as e:
                     self._log(f"Cannot read file {p}: {e}", "error")
@@ -455,13 +459,14 @@ class VideoEditor(_Root):
         ttk.Button(btns, text="Clear",
                    command=self._concat_clear).pack(side="left", padx=4)
 
-        cols = ("#", "File", "Duration", "Resolution", "Size")
+        cols = ("#", "File", "Source", "Keep (in → out)", "Output", "Resolution", "Size")
         self.concat_tree = ttk.Treeview(left, columns=cols, show="headings",
                                         selectmode="extended", height=9)
-        for c, w in zip(cols, (40, 340, 90, 110, 90)):
+        for c, w in zip(cols, (40, 260, 70, 145, 70, 105, 85)):
             self.concat_tree.heading(c, text=c)
             self.concat_tree.column(c, width=w, anchor="w")
         self.concat_tree.pack(fill="both", expand=True)
+        self.concat_tree.bind("<<TreeviewSelect>>", self._concat_selection_changed)
 
         sb = ttk.Scrollbar(left, orient="vertical", command=self.concat_tree.yview)
         self.concat_tree.configure(yscrollcommand=sb.set)
@@ -482,10 +487,36 @@ class VideoEditor(_Root):
         self.concat_mode.set("Re-encode (safe)")
         self.concat_mode.pack(anchor="w", pady=(2, 10))
 
+        trim = ttk.LabelFrame(right, text="Trim selected clip", padding=8)
+        trim.pack(fill="x", pady=(4, 8))
+        self.concat_trim_note = tk.StringVar(
+            value="Select one clip to set the kept range.")
+        ttk.Label(trim, textvariable=self.concat_trim_note, foreground="#a6adc8",
+                  wraplength=205, justify="left").pack(anchor="w", pady=(0, 6))
+        fields = ttk.Frame(trim)
+        fields.pack(fill="x")
+        ttk.Label(fields, text="Start (s)").grid(row=0, column=0, sticky="w")
+        ttk.Label(fields, text="End (s)").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.concat_trim_start = tk.StringVar()
+        self.concat_trim_end = tk.StringVar()
+        ttk.Entry(fields, textvariable=self.concat_trim_start, width=11).grid(
+            row=0, column=1, sticky="ew", padx=(8, 0))
+        ttk.Entry(fields, textvariable=self.concat_trim_end, width=11).grid(
+            row=1, column=1, sticky="ew", padx=(8, 0), pady=(4, 0))
+        fields.columnconfigure(1, weight=1)
+        trim_buttons = ttk.Frame(trim)
+        trim_buttons.pack(fill="x", pady=(7, 0))
+        ttk.Button(trim_buttons, text="Apply trim",
+                   command=self._concat_apply_trim).pack(side="left")
+        ttk.Button(trim_buttons, text="Reset",
+                   command=self._concat_reset_trim).pack(side="left", padx=(5, 0))
+
         ttk.Button(right, text="▶ Concatenate", style="Accent.TButton",
                    command=self._concat_go).pack(fill="x", pady=8)
 
-        hint = "Order in the list = order\nin the final video.\n\nFiles dialog: Ctrl/Shift+click\nto select multiple videos."
+        hint = ("Order in the list = order\nin the final video.\n\n"
+                "Trim keeps the range from start\nto end seconds for each clip.\n\n"
+                "Files dialog: Ctrl/Shift+click\nto select multiple videos.")
         if self._dnd_ok:
             hint += "\n\nOr drag & drop video files\nstraight into this window."
         else:
@@ -497,7 +528,10 @@ class VideoEditor(_Root):
         added = 0
         for p in self._pick_videos():
             if p not in [v["path"] for v in self.videos]:
-                self.videos.append({"path": p, "info": probe(p)})
+                info = probe(p)
+                self.videos.append({"path": p, "info": info,
+                                    "trim_start": 0.0,
+                                    "trim_end": info["duration"]})
                 added += 1
         if added:
             self._log(f"Added {added} video(s) to concat list")
@@ -544,9 +578,71 @@ class VideoEditor(_Root):
         for i, v in enumerate(self.videos):
             inf = v["info"]
             res = f"{inf['v']['w']}x{inf['v']['h']}" if inf["v"] else "audio"
+            start, end = self._clip_range(v)
             self.concat_tree.insert("", "end", iid=str(i), values=(
                 i + 1, os.path.basename(v["path"]), human_dur(inf["duration"]),
+                f"{start:.2f} → {end:.2f} s", human_dur(end - start),
                 res, human_size(inf["size"])))
+
+    def _clip_range(self, video):
+        """Return the validated kept range for a concatenation clip."""
+        duration = video["info"]["duration"]
+        start = max(0.0, min(float(video.get("trim_start", 0.0)), duration))
+        end = max(start, min(float(video.get("trim_end", duration)), duration))
+        return start, end
+
+    def _concat_selection_changed(self, _event=None):
+        selected = self.concat_tree.selection()
+        if len(selected) != 1:
+            self.concat_trim_start.set("")
+            self.concat_trim_end.set("")
+            self.concat_trim_note.set("Select one clip to set the kept range.")
+            return
+        video = self.videos[int(selected[0])]
+        start, end = self._clip_range(video)
+        self.concat_trim_start.set(f"{start:.3f}".rstrip("0").rstrip("."))
+        self.concat_trim_end.set(f"{end:.3f}".rstrip("0").rstrip("."))
+        self.concat_trim_note.set(
+            f"Source length: {video['info']['duration']:.3f} s. End is exclusive.")
+
+    def _concat_apply_trim(self):
+        selected = self.concat_tree.selection()
+        if len(selected) != 1:
+            messagebox.showinfo("Trim clip", "Select exactly one clip to trim.")
+            return
+        video = self.videos[int(selected[0])]
+        try:
+            start = float(self.concat_trim_start.get().strip())
+            end = float(self.concat_trim_end.get().strip())
+        except ValueError:
+            messagebox.showwarning("Trim clip", "Enter start and end times in seconds.")
+            return
+        duration = video["info"]["duration"]
+        if (not math.isfinite(start) or not math.isfinite(end)
+                or start < 0 or end > duration or end <= start):
+            messagebox.showwarning(
+                "Trim clip",
+                f"Use a range where 0 ≤ start < end ≤ {duration:.3f} seconds.")
+            return
+        video["trim_start"] = start
+        video["trim_end"] = end
+        self._refresh_concat()
+        self.concat_tree.selection_set(selected[0])
+        self._concat_selection_changed()
+        self._log(f"Trim set for {os.path.basename(video['path'])}: {start:.3f}s → {end:.3f}s")
+
+    def _concat_reset_trim(self):
+        selected = self.concat_tree.selection()
+        if len(selected) != 1:
+            messagebox.showinfo("Trim clip", "Select exactly one clip to reset.")
+            return
+        video = self.videos[int(selected[0])]
+        video["trim_start"] = 0.0
+        video["trim_end"] = video["info"]["duration"]
+        self._refresh_concat()
+        self.concat_tree.selection_set(selected[0])
+        self._concat_selection_changed()
+        self._log(f"Trim reset for {os.path.basename(video['path'])}")
 
     def _concat_go(self):
         if len(self.videos) < 2:
@@ -557,7 +653,12 @@ class VideoEditor(_Root):
             return
         fmt = self.concat_fmt.get()
         stream_copy = self.concat_mode.get().startswith("Stream")
-        self._log(f"Concat start: {len(self.videos)} videos, "
+        total = sum(self._clip_range(v)[1] - self._clip_range(v)[0]
+                    for v in self.videos)
+        if total <= 0:
+            messagebox.showwarning("Concatenate", "Each clip must keep some video.")
+            return
+        self._log(f"Concat start: {len(self.videos)} trimmed video(s), "
                   f"mode={'stream-copy' if stream_copy else 're-encode'}, "
                   f"format={fmt} -> {out}")
 
@@ -573,7 +674,8 @@ class VideoEditor(_Root):
 
     def _concat_reencode(self, out, fmt, w, h, fps):
         tmp = tempfile.mkdtemp(prefix="ved_concat_")
-        total = sum(v["info"]["duration"] for v in self.videos)
+        total = sum(self._clip_range(v)[1] - self._clip_range(v)[0]
+                    for v in self.videos)
 
         # Step 1: normalize each file
         def normalize_all(done_cb):
@@ -584,8 +686,10 @@ class VideoEditor(_Root):
                     done_cb(results)
                     return
                 v = self.videos[i]
+                start, end = self._clip_range(v)
                 dst = os.path.join(tmp, f"part{i:03d}.mp4")
-                args = ["-i", v["path"],
+                args = ["-i", v["path"], "-ss", f"{start:.6f}",
+                        "-t", f"{end - start:.6f}",
                         "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
                                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps={fps}",
                         "-c:v", "libx264", "-preset", "fast", "-crf", "20",
@@ -600,7 +704,7 @@ class VideoEditor(_Root):
                     else:
                         shutil.rmtree(tmp, ignore_errors=True)
 
-                self._run_ffmpeg_duration(args, v["info"]["duration"], after)
+                self._run_ffmpeg_duration(args, end - start, after)
 
             step(0)
 
@@ -622,8 +726,12 @@ class VideoEditor(_Root):
         with open(listfile, "w") as f:
             for v in self.videos:
                 f.write(f"file '{v['path'].replace(os.sep, '/')}'\n")
+                start, end = self._clip_range(v)
+                f.write(f"inpoint {start:.6f}\n")
+                f.write(f"outpoint {end:.6f}\n")
         args = ["-f", "concat", "-safe", "0", "-i", listfile, "-c", "copy", out]
-        total = sum(v["info"]["duration"] for v in self.videos)
+        total = sum(self._clip_range(v)[1] - self._clip_range(v)[0]
+                    for v in self.videos)
         self._run_ffmpeg_duration(args, total, lambda ok: self._cleanup(tmp, ok, out))
 
     def _cleanup(self, tmp, ok, out):
