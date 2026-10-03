@@ -43,7 +43,14 @@ pip install tkinterdnd2
 - Font family, size, color picker, outline, optional semi-transparent box
 - Live preview of text color; labels render in list order
 
-### 4. Basic Tools
+### 4. Image Inserts
+- Add a PNG, JPG, WEBP, BMP, or GIF as a full-frame still image clip
+- Place it at the beginning, midpoint, end, or an exact timestamp in the video
+- Choose how long it stays on screen, with slow zoom-in/zoom-out motion
+- Add fade-in, fade-out, or fade-in/out animation; audio is preserved around
+  the insert and a matching silent section is added for the still
+
+### 5. Basic Tools
 - Trim / cut by start-end time
 - Extract audio (mp3, aac, wav, flac, opus)
 - Remove audio track
@@ -52,7 +59,7 @@ pip install tkinterdnd2
 - Rotate (90° CW/CCW, 180°) and flip
 - Adjust volume
 
-### 5. Status / Log console
+### 6. Status / Log console
 - Shows the exact CLI command being executed (`$ ffmpeg ...`)
 - Live FFmpeg progress (frame/fps/time/speed) plus the progress bar
 - Timestamped log of every operation (adds, drops, label edits, completion

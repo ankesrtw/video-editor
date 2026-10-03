@@ -25,6 +25,7 @@ FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 FFPROBE = shutil.which("ffprobe") or "ffprobe"
 VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv",
               ".wmv", ".ts", ".m4v", ".mpg", ".mpeg"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 
 
 def probe(path):
@@ -294,6 +295,7 @@ class VideoEditor(_Root):
         self._tab_concat()
         self._tab_quality()
         self._tab_labels()
+        self._tab_images()
         self._tab_basic()
 
         # ---------- status / log console ----------
@@ -1257,7 +1259,15 @@ class VideoEditor(_Root):
             elif e is None:
                 e = 999999
             parts = [f"text='{text}'"]
-            parts.append(f"fontfile='{fontfile}'" if fontfile else f"font='{lab['font']}'")
+            if fontfile:
+                # FFmpeg filtergraph: ':' separates options and '\' is an
+                # escape char, so a Windows path like C:\WINDOWS\Fonts\...
+                # splits the option and aborts parsing. Use forward slashes
+                # and escape the drive-letter colon: C\:/WINDOWS/Fonts/...
+                font_esc = fontfile.replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+                parts.append(f"fontfile='{font_esc}'")
+            else:
+                parts.append(f"font='{lab['font']}'")
             parts.append(f"fontsize={size}")
             parts.append(f"fontcolor={color}")
             parts.append(f"x={x_expr}")
@@ -1328,7 +1338,190 @@ class VideoEditor(_Root):
         self._run_ffmpeg_duration(args, info["duration"],
                                   self._saved("Labels", out))
 
-    # ---------- Tab 4: Basic tools ----------
+    # ---------- Tab 4: Image inserts ----------
+    def _tab_images(self):
+        f = self._scrolled_tab("  Image Inserts  ")
+
+        ttk.Label(f, text="Add a full-frame still anywhere in your video",
+                  font=("Helvetica", 11, "bold")).pack(anchor="w")
+        ttk.Label(f, text=("The image becomes its own clip. It can introduce the video, "
+                           "interrupt it briefly, or close it out."),
+                  foreground="#a6adc8").pack(anchor="w", pady=(2, 10))
+
+        files = ttk.LabelFrame(f, text="Media", padding=10)
+        files.pack(fill="x", pady=(0, 8))
+        self.img_video_path = tk.StringVar()
+        self.img_path = tk.StringVar()
+        for label, var, command in [
+            ("Video", self.img_video_path, self._img_browse_video),
+            ("Image", self.img_path, self._img_browse_image),
+        ]:
+            row = ttk.Frame(files)
+            row.pack(fill="x", pady=3)
+            ttk.Label(row, text=label, width=8).pack(side="left")
+            ttk.Entry(row, textvariable=var).pack(side="left", fill="x", expand=True, padx=(0, 6))
+            ttk.Button(row, text="Browse...", command=command).pack(side="left")
+
+        placement = ttk.LabelFrame(f, text="Timeline placement", padding=10)
+        placement.pack(fill="x", pady=8)
+        row = ttk.Frame(placement)
+        row.pack(fill="x")
+        ttk.Label(row, text="Place image").pack(side="left")
+        self.img_placement = ttk.Combobox(
+            row, state="readonly", width=24,
+            values=["At the beginning", "In the middle", "At the end", "At a custom time"])
+        self.img_placement.set("At the beginning")
+        self.img_placement.pack(side="left", padx=(6, 16))
+        self.img_placement.bind("<<ComboboxSelected>>", self._img_placement_changed)
+        ttk.Label(row, text="Custom time (s)").pack(side="left")
+        self.img_time = tk.StringVar(value="0")
+        self.img_time_entry = ttk.Entry(row, textvariable=self.img_time, width=9)
+        self.img_time_entry.pack(side="left", padx=6)
+        self._img_placement_changed()
+        ttk.Label(placement, text="For middle placement, the editor uses the midpoint. "
+                  "Custom time is measured from the start of the source video.",
+                  foreground="#a6adc8").pack(anchor="w", pady=(6, 0))
+
+        motion = ttk.LabelFrame(f, text="Duration and motion", padding=10)
+        motion.pack(fill="x", pady=8)
+        row = ttk.Frame(motion)
+        row.pack(fill="x")
+        ttk.Label(row, text="Show for (s)").pack(side="left")
+        self.img_duration = tk.StringVar(value="3")
+        ttk.Entry(row, textvariable=self.img_duration, width=8).pack(side="left", padx=(6, 16))
+        ttk.Label(row, text="Zoom").pack(side="left")
+        self.img_zoom = ttk.Combobox(row, state="readonly", width=18,
+                                     values=["None", "Slow zoom in", "Slow zoom out"])
+        self.img_zoom.set("Slow zoom in")
+        self.img_zoom.pack(side="left", padx=(6, 16))
+        ttk.Label(row, text="Animation").pack(side="left")
+        self.img_animation = ttk.Combobox(
+            row, state="readonly", width=18,
+            values=["None", "Fade in", "Fade out", "Fade in & out"])
+        self.img_animation.set("Fade in & out")
+        self.img_animation.pack(side="left", padx=6)
+        ttk.Label(motion, text="Zoom keeps the frame filled; fades are capped so short clips remain visible.",
+                  foreground="#a6adc8").pack(anchor="w", pady=(6, 0))
+
+        ttk.Button(f, text="▶ Add Image to Video", style="Accent.TButton",
+                   command=self._img_go).pack(fill="x", pady=(10, 0))
+
+    def _img_browse_video(self):
+        p = filedialog.askopenfilename(
+            filetypes=[("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv *.ts *.m4v"),
+                       ("All files", "*.*")])
+        if p:
+            self.img_video_path.set(p)
+
+    def _img_browse_image(self):
+        p = filedialog.askopenfilename(
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.webp *.bmp *.gif"),
+                       ("All files", "*.*")])
+        if p:
+            self.img_path.set(p)
+
+    def _img_insert_time(self, video_duration):
+        placement = self.img_placement.get()
+        if placement == "At the beginning":
+            return 0.0
+        if placement == "At the end":
+            return video_duration
+        if placement == "In the middle":
+            return video_duration / 2
+        try:
+            return min(video_duration, max(0.0, float(self.img_time.get())))
+        except ValueError:
+            raise ValueError("Custom time must be a number of seconds.")
+
+    def _img_placement_changed(self, _event=None):
+        state = "normal" if self.img_placement.get() == "At a custom time" else "disabled"
+        self.img_time_entry.configure(state=state)
+
+    def _img_go(self):
+        video, image = self.img_video_path.get(), self.img_path.get()
+        if not video or not os.path.isfile(video):
+            messagebox.showinfo("Image Inserts", "Select an input video first.")
+            return
+        if not image or not os.path.isfile(image):
+            messagebox.showinfo("Image Inserts", "Select an image first.")
+            return
+        if os.path.splitext(image)[1].lower() not in IMAGE_EXTS:
+            messagebox.showinfo("Image Inserts", "Choose a PNG, JPG, WEBP, BMP, or GIF image.")
+            return
+        try:
+            still_duration = float(self.img_duration.get())
+            if not 0.1 <= still_duration <= 3600:
+                raise ValueError("Image duration must be between 0.1 and 3600 seconds.")
+            info = probe(video)
+            if not info["v"] or info["duration"] <= 0:
+                raise ValueError("The input must contain a video stream with a duration.")
+            insert_at = self._img_insert_time(info["duration"])
+        except ValueError as e:
+            messagebox.showinfo("Image Inserts", str(e) or "Duration must be between 0.1 and 3600 seconds.")
+            return
+        out = self._output_path("image_insert_" + os.path.basename(video))
+        if not out:
+            return
+
+        w, h = info["v"]["w"], info["v"]["h"]
+        fps = info["v"].get("fps") or 30
+        fps = max(1, min(120, round(fps)))
+        frames = max(1, round(still_duration * fps))
+        zoom = self.img_zoom.get()
+        base = (f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+                f"crop={w}:{h}")
+        if zoom == "Slow zoom in":
+            still = base + f",zoompan=z='min(zoom+0.0012,1.12)':d={frames}:s={w}x{h}:fps={fps}"
+        elif zoom == "Slow zoom out":
+            still = base + (f",zoompan=z='if(eq(on,0),1.12,max(1.0,zoom-0.0012))':"
+                            f"d={frames}:s={w}x{h}:fps={fps}")
+        else:
+            still = base + f",fps={fps}"
+        anim_duration = min(0.5, still_duration / 3)
+        animation = self.img_animation.get()
+        if animation in ("Fade in", "Fade in & out"):
+            still += f",fade=t=in:st=0:d={anim_duration:.3f}"
+        if animation in ("Fade out", "Fade in & out"):
+            still += f",fade=t=out:st={max(0, still_duration - anim_duration):.3f}:d={anim_duration:.3f}"
+
+        # Split the source around the insertion point, then concatenate its video
+        # segments with a looping still. A matching silence segment keeps audio in sync.
+        graph = []
+        video_parts = []
+        audio_parts = []
+        if insert_at > 0.001:
+            graph.append(f"[0:v]trim=0:{insert_at:.6f},setpts=PTS-STARTPTS[va]")
+            video_parts.append("[va]")
+            if info["a"]:
+                graph.append(f"[0:a]atrim=0:{insert_at:.6f},asetpts=PTS-STARTPTS[aa]")
+                audio_parts.append("[aa]")
+        graph.append(f"[1:v]{still},trim=duration={still_duration:.6f},setpts=PTS-STARTPTS[vi]")
+        video_parts.append("[vi]")
+        if info["a"]:
+            graph.append(f"anullsrc=r=44100:cl=stereo:d={still_duration:.6f}[ai]")
+            audio_parts.append("[ai]")
+        if insert_at < info["duration"] - 0.001:
+            graph.append(f"[0:v]trim=start={insert_at:.6f},setpts=PTS-STARTPTS[vb]")
+            video_parts.append("[vb]")
+            if info["a"]:
+                graph.append(f"[0:a]atrim=start={insert_at:.6f},asetpts=PTS-STARTPTS[ab]")
+                audio_parts.append("[ab]")
+        graph.append("".join(video_parts) + f"concat=n={len(video_parts)}:v=1:a=0[vout]")
+        if info["a"]:
+            graph.append("".join(audio_parts) + f"concat=n={len(audio_parts)}:v=0:a=1[aout]")
+
+        args = ["-i", video, "-loop", "1", "-framerate", str(fps), "-i", image,
+                "-filter_complex", ";".join(graph), "-map", "[vout]"]
+        if info["a"]:
+            args += ["-map", "[aout]", "-c:a", "aac", "-ar", "44100", "-ac", "2"]
+        args += ["-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                 "-pix_fmt", "yuv420p", "-movflags", "+faststart", out]
+        self._log(f"Image insert: {os.path.basename(image)} at {insert_at:.2f}s for {still_duration:.2f}s "
+                  f"({zoom.lower()}, {animation.lower()})")
+        self._run_ffmpeg_duration(args, info["duration"] + still_duration,
+                                  self._saved("Image Inserts", out))
+
+    # ---------- Tab 5: Basic tools ----------
     def _tab_basic(self):
         f = self._scrolled_tab("  Basic Tools  ")
 
