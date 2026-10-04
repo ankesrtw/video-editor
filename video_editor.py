@@ -367,7 +367,8 @@ class VideoEditor(_Root):
             try:
                 proc = subprocess.Popen([FFMPEG, "-y", *args],
                                         stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT, text=True)
+                                        stderr=subprocess.STDOUT, text=True,
+                                        encoding="utf-8", errors="replace")
                 for raw in proc.stdout:
                     if self._cancelled:
                         proc.terminate()
